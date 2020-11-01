@@ -1,7 +1,7 @@
 {
   "worker_count": 5,
   "postgres": {
-    "host":"interview-timescaledb",
+    "host":"interview-db",
     "port": 5432,
     "ssl": false,
     "db": "homework",
