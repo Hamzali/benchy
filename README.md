@@ -98,4 +98,5 @@ program splits into four main parts;
 - collect results and print
 
 data flow diagram;
+
 ![Project Structure](docs/project.png)
