@@ -182,6 +182,42 @@ func connectDB(conf PostgresConfig) (*sql.DB, error) {
 	return db, nil
 }
 
+const testQuery = `
+SELECT 
+       time_bucket('1 minute', ts) AS one_min,
+       AVG(usage),
+       MIN(usage),
+       MAX(usage)
+FROM cpu_usage
+WHERE host = $1
+  AND ts BETWEEN $2 AND $3
+GROUP BY one_min
+ORDER BY one_min DESC;
+`
+
+func runTestQuery(db *sql.DB, q QueryParams) error {
+	rows, err := db.Query(
+		testQuery,
+		q.Host,
+		q.Start,
+		q.End,
+	)
+	if err != nil {
+		return err
+	}
+	for rows.Next() {
+		var oneMin time.Time
+		var avg float64
+		var max float64
+		var min float64
+		err = rows.Scan(&oneMin, &avg, &min, &max)
+		if err != nil {
+			return err
+		}
+	}
+	return rows.Close()
+}
+
 func percentile(data []float64, p float64) float64 {
 	if p < 0 {
 		return math.NaN()
@@ -199,19 +235,6 @@ func percentile(data []float64, p float64) float64 {
 	i := int(ri) - 1
 	return data[i] + rf*(data[i+1]-data[i])
 }
-
-const testQuery = `
-SELECT 
-       time_bucket('1 minute', ts) AS one_min,
-       AVG(usage),
-       MIN(usage),
-       MAX(usage)
-FROM cpu_usage
-WHERE host = $1
-  AND ts BETWEEN $2 AND $3
-GROUP BY one_min
-ORDER BY one_min DESC;
-`
 
 const resultMsg = `#summary:
 total_count: 	%d
@@ -240,6 +263,16 @@ func main() {
 		errLogger.Fatalln(err)
 	}
 
+	db, err := connectDB(config.Postgres)
+	if err != nil {
+		errLogger.Fatalln(err)
+	}
+	defer func() {
+		if err = db.Close(); err != nil {
+			errLogger.Println(err)
+		}
+	}()
+
 	// initialize workers
 	var workerChs []chan QueryParams
 	result := make(chan QueryResult)
@@ -247,31 +280,17 @@ func main() {
 	workerWg.Add(config.WorkerCount)
 	for i := 0; i < config.WorkerCount; i++ {
 		workerChs = append(workerChs, make(chan QueryParams))
-		db, err := connectDB(config.Postgres)
-		if err != nil {
-			errLogger.Fatalln(err)
-		}
 		go func(ch chan QueryParams) {
 			defer workerWg.Done()
 			for q := range ch {
 				now := time.Now()
-				_, err := db.Exec(
-					testQuery,
-					q.Host,
-					q.Start,
-					q.End,
-				)
+				err := runTestQuery(db, q)
 				elapsed := time.Since(now)
-				r := QueryResult{
+				result <- QueryResult{
 					Host:     q.Host,
 					Duration: float64(elapsed.Milliseconds()),
 					Error:    err,
 				}
-				result <- r
-			}
-			err = db.Close()
-			if err != nil {
-				errLogger.Println(err)
 			}
 		}(workerChs[i])
 	}
