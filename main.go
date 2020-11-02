@@ -4,9 +4,9 @@ import (
 	"database/sql"
 	"encoding/csv"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
-	_ "github.com/lib/pq"
 	"io"
 	"io/ioutil"
 	"log"
@@ -16,59 +16,9 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	_ "github.com/lib/pq"
 )
-
-type QueryParams struct {
-	Host  string
-	Start time.Time
-	End   time.Time
-}
-
-type QueryResult struct {
-	Duration float64
-	Host     string
-	Error    error
-}
-
-const DateTimeLayout = "2006-01-02 15:04:05"
-
-func parseLine(line []string) (*QueryParams, error) {
-	if len(line) != 3 {
-		return nil, fmt.Errorf("invalid line length %d", len(line))
-	}
-
-	hostname := line[0]
-	if hostname == "" {
-		return nil, fmt.Errorf("empty host name")
-	}
-
-	start, err := time.Parse(DateTimeLayout, line[1])
-	if err != nil {
-		return nil, fmt.Errorf("invalid start time value %v", line[1])
-	}
-
-	end, err := time.Parse(DateTimeLayout, line[2])
-	if err != nil {
-		return nil, fmt.Errorf("invalid end time value %v", line[2])
-	}
-
-	query := QueryParams{
-		Host:  hostname,
-		Start: start,
-		End:   end,
-	}
-	return &query, nil
-}
-
-const ExpectedHeaderStr = "hostname,start_time,end_time"
-
-func validateHeader(line []string) error {
-	givenHeaderStr := strings.Join(line, ",")
-	if givenHeaderStr == ExpectedHeaderStr {
-		return nil
-	}
-	return fmt.Errorf("invalid header, expected: %s but give: %s", ExpectedHeaderStr, givenHeaderStr)
-}
 
 type PostgresConfig struct {
 	Host     string `json:"host"`
@@ -78,38 +28,51 @@ type PostgresConfig struct {
 	Database string `json:"db"`
 	SSL      bool   `json:"ssl"`
 }
+
 type Config struct {
 	File        string         `json:"-"`
 	WorkerCount int            `json:"worker_count"`
 	Postgres    PostgresConfig `json:"postgres"`
 }
 
+// read config file.
 func readConfig(path string, config *Config) error {
 	f, err := os.Open(path)
 	if err != nil {
-		return err
+		return fmt.Errorf("could not open file: %w", err)
 	}
+
 	b, err := ioutil.ReadAll(f)
 	if err != nil {
-		return err
+		return fmt.Errorf("could not read file: %w", err)
 	}
+
 	err = json.Unmarshal(b, &config)
 	if err != nil {
-		return err
+		return fmt.Errorf("could not parse json: %w", err)
 	}
+
 	err = f.Close()
 	if err != nil {
-		return err
+		return fmt.Errorf("could not close file: %w", err)
 	}
+
 	return nil
 }
 
+const (
+	DefaultPostgresPort = 5432
+	DefaultWorkerCount  = 5
+)
+
+// initialize config with defaults.
 func initConfig() (*Config, error) {
 	config := Config{
-		WorkerCount: 5,
+		WorkerCount: DefaultWorkerCount,
+		File:        "",
 		Postgres: PostgresConfig{
 			Host:     "localhost",
-			Port:     5432,
+			Port:     DefaultPostgresPort,
 			SSL:      false,
 			Database: "postgres",
 			User:     "postgres",
@@ -118,8 +81,11 @@ func initConfig() (*Config, error) {
 	}
 
 	var workerCount, port int
+
 	var confPath, host, user, password, db string
+
 	var ssl bool
+
 	flag.IntVar(&workerCount, "worker", config.WorkerCount, "worker count")
 	flag.StringVar(&host, "host", config.Postgres.Host, "database host")
 	flag.IntVar(&port, "port", config.Postgres.Port, "database port")
@@ -136,7 +102,7 @@ func initConfig() (*Config, error) {
 	if confPath != "" {
 		err := readConfig(confPath, &config)
 		if err != nil {
-			return nil, fmt.Errorf("invalid config %s, %v", confPath, err)
+			return nil, fmt.Errorf("invalid config %s, %w", confPath, err)
 		}
 	}
 
@@ -163,23 +129,32 @@ func initConfig() (*Config, error) {
 	return &config, nil
 }
 
-func connectDB(conf PostgresConfig) (*sql.DB, error) {
+func connectDB(host, user, password, dbname string, port int, ssl bool) (*sql.DB, error) {
 	dsn := fmt.Sprintf(
 		"host=%s port=%d user=%s password=%s dbname=%s",
-		conf.Host, conf.Port, conf.User, conf.Password, conf.Database,
+		host, port, user, password, dbname,
 	)
-	if !conf.SSL {
+	if !ssl {
 		dsn += " sslmode=disable"
 	}
+
 	db, err := sql.Open("postgres", dsn)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("can't open db connection: %w", err)
 	}
+
 	err = db.Ping()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("can't ping db: %w", err)
 	}
+
 	return db, nil
+}
+
+type QueryParams struct {
+	Host  string
+	Start time.Time
+	End   time.Time
 }
 
 const testQuery = `
@@ -203,37 +178,301 @@ func runTestQuery(db *sql.DB, q QueryParams) error {
 		q.End,
 	)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to execute query: %w", err)
 	}
+
 	for rows.Next() {
+		if rows.Err() != nil {
+			return fmt.Errorf("failed to read rows: %w", err)
+		}
+
 		var oneMin time.Time
+
 		var avg float64
+
 		var max float64
+
 		var min float64
+
 		err = rows.Scan(&oneMin, &avg, &min, &max)
 		if err != nil {
-			return err
+			return fmt.Errorf("failed to scan row: %w", err)
 		}
 	}
-	return rows.Close()
+
+	defer func() {
+		if err := rows.Close(); err != nil {
+			return
+		}
+	}()
+
+	return nil
 }
 
+type QueryResult struct {
+	Duration float64
+	Host     string
+	Error    error
+}
+
+// initialize workers and setup channels.
+func startWorkers(db *sql.DB, workerCount int) ([]chan QueryParams, chan QueryResult) {
+	var workerChs []chan QueryParams
+
+	var workerWg sync.WaitGroup
+
+	result := make(chan QueryResult)
+
+	workerWg.Add(workerCount)
+
+	for i := 0; i < workerCount; i++ {
+		workerChs = append(workerChs, make(chan QueryParams))
+		go func(ch chan QueryParams) {
+			defer workerWg.Done()
+
+			for q := range ch {
+				now := time.Now()
+				err := runTestQuery(db, q)
+				elapsed := time.Since(now)
+				result <- QueryResult{
+					Host:     q.Host,
+					Duration: float64(elapsed.Milliseconds()),
+					Error:    err,
+				}
+			}
+		}(workerChs[i])
+	}
+
+	// close result channel after every worker finishes
+	go func() {
+		workerWg.Wait()
+		close(result)
+	}()
+
+	return workerChs, result
+}
+
+const (
+	DateTimeLayout = "2006-01-02 15:04:05"
+	LineLength     = 3
+)
+
+var (
+	errInvalidLineLen = errors.New("invalid line length")
+	errEmptyHostname  = errors.New("empty host name")
+	errInvalidHeader  = errors.New("invalid header")
+)
+
+func parseLine(line []string) (*QueryParams, error) {
+	if len(line) != LineLength {
+		return nil, fmt.Errorf("given line len: %d, %w", len(line), errInvalidLineLen)
+	}
+
+	hostname := line[0]
+	if hostname == "" {
+		return nil, errEmptyHostname
+	}
+
+	start, err := time.Parse(DateTimeLayout, line[1])
+	if err != nil {
+		return nil, fmt.Errorf("invalid start time value %v: %w", line[1], err)
+	}
+
+	end, err := time.Parse(DateTimeLayout, line[2])
+	if err != nil {
+		return nil, fmt.Errorf("invalid start time value %v: %w", line[2], err)
+	}
+
+	query := QueryParams{
+		Host:  hostname,
+		Start: start,
+		End:   end,
+	}
+
+	return &query, nil
+}
+
+const ExpectedHeaderStr = "hostname,start_time,end_time"
+
+func validateHeader(line []string) error {
+	givenHeaderStr := strings.Join(line, ",")
+	if givenHeaderStr == ExpectedHeaderStr {
+		return nil
+	}
+
+	return fmt.Errorf("expected: %s but give: %s, %w", ExpectedHeaderStr, givenHeaderStr, errInvalidHeader)
+}
+
+func parseCsv(reader io.Reader, cb func(err error, params *QueryParams)) error {
+	csvReader := csv.NewReader(reader)
+
+	first, err := csvReader.Read()
+	if err != nil {
+		return fmt.Errorf("could not read header: %w", err)
+	}
+
+	err = validateHeader(first)
+	if err != nil {
+		return err
+	}
+
+	lineNum := 0
+
+	for {
+		record, err := csvReader.Read()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+
+		lineNum++
+
+		if err != nil {
+			cb(err, nil)
+
+			continue
+		}
+
+		query, err := parseLine(record)
+		if err != nil {
+			cb(fmt.Errorf("record on line %d: %w", lineNum, err), nil)
+
+			continue
+		}
+
+		cb(nil, query)
+	}
+
+	return nil
+}
+
+func readCsv(file string) (io.Reader, error) {
+	if file == "" {
+		return os.Stdin, nil
+	}
+
+	reader, err := os.Open(file)
+	if err != nil {
+		return nil, fmt.Errorf("could not open csv file: %w", err)
+	}
+
+	return reader, nil
+}
+
+// parse input rows and assign to workers.
+func processCsv(file string, errCh chan error, workerChs []chan QueryParams) (parseFailure int, err error) {
+	reader, err := readCsv(file)
+	if err != nil {
+		return
+	}
+
+	hostWorkerMap := map[string]int{}
+	workerIndex := 0
+
+	err = parseCsv(reader, func(err error, query *QueryParams) {
+		if err != nil {
+			errCh <- err
+			parseFailure++
+
+			return
+		}
+
+		w, ok := hostWorkerMap[query.Host]
+		if !ok {
+			w = workerIndex
+			hostWorkerMap[query.Host] = w
+			workerIndex = (workerIndex + 1) % len(workerChs)
+		}
+
+		ch := workerChs[w]
+		ch <- *query
+	})
+
+	return
+}
+
+const (
+	MaxPercentile        = 100
+	MinPercentile        = 0
+	MinPercentileDataLen = 2
+)
+
 func percentile(data []float64, p float64) float64 {
-	if p < 0 {
+	if p < MinPercentile {
 		return math.NaN()
 	}
-	if p > 100 {
+
+	if p > MaxPercentile {
 		return math.NaN()
 	}
+
 	n := float64(len(data))
-	if n < 2 {
+
+	if n < MinPercentileDataLen {
 		return math.NaN()
 	}
+
 	rank := (p/100)*(n-1) + 1
 	ri := float64(int64(rank))
 	rf := rank - ri
 	i := int(ri) - 1
+
 	return data[i] + rf*(data[i+1]-data[i])
+}
+
+type Stats struct {
+	ExecCount      int
+	FailedCount    int
+	Sum            float64
+	Min            float64
+	Max            float64
+	Mean           float64
+	Median         float64
+	Percentile95th float64
+	Percentile99th float64
+}
+
+// listen to results and accumulate then print.
+func collectResult(errCh chan error, result chan QueryResult, statCh chan Stats) {
+	durations := []float64{}
+
+	execCount := 0
+	sqlFailure := 0
+
+	min := math.Inf(1)
+	max := math.Inf(-1)
+
+	var sum float64 = 0
+
+	for r := range result {
+		if r.Error != nil {
+			errCh <- fmt.Errorf("sql err: %w", r.Error)
+			sqlFailure++
+
+			continue
+		}
+
+		execCount++
+
+		durations = append(durations, r.Duration)
+
+		min = math.Min(min, r.Duration)
+		max = math.Max(max, r.Duration)
+		sum += r.Duration
+	}
+
+	sort.Float64s(durations)
+
+	statCh <- Stats{
+		ExecCount:      execCount,
+		FailedCount:    sqlFailure,
+		Sum:            sum,
+		Min:            min,
+		Max:            max,
+		Mean:           sum / float64(execCount),
+		Median:         percentile(durations, 50),
+		Percentile95th: percentile(durations, 95),
+		Percentile99th: percentile(durations, 99),
+	}
 }
 
 const resultMsg = `#summary:
@@ -251,161 +490,74 @@ median:	%.2fms
 99th:	%.2fms
 `
 
-const LoggerPrefix = ""
+func printResult(parseFailure int, stat Stats) {
+	total := stat.ExecCount + stat.FailedCount + parseFailure
+	fmt.Printf(
+		resultMsg,
+		total,
+		stat.ExecCount,
+		stat.FailedCount,
+		parseFailure,
+		stat.Sum,
+		stat.Min,
+		stat.Max,
+		stat.Mean,
+		stat.Median,
+		stat.Percentile95th,
+		stat.Percentile99th,
+	)
+}
 
 func main() {
-	errLogger := log.New(os.Stderr, LoggerPrefix, log.Lmsgprefix)
-	infoLogger := log.New(os.Stdout, LoggerPrefix, log.Lmsgprefix)
+	errLogger := log.New(os.Stderr, "", log.Lmsgprefix)
 
-	// read and parse user flags
 	config, err := initConfig()
 	if err != nil {
 		errLogger.Fatalln(err)
 	}
 
-	db, err := connectDB(config.Postgres)
+	db, err := connectDB(
+		config.Postgres.Host,
+		config.Postgres.User,
+		config.Postgres.Password,
+		config.Postgres.Database,
+		config.Postgres.Port,
+		config.Postgres.SSL,
+	)
 	if err != nil {
 		errLogger.Fatalln(err)
 	}
+
 	defer func() {
 		if err = db.Close(); err != nil {
 			errLogger.Println(err)
 		}
 	}()
 
-	// initialize workers
-	var workerChs []chan QueryParams
-	result := make(chan QueryResult)
-	var workerWg sync.WaitGroup
-	workerWg.Add(config.WorkerCount)
-	for i := 0; i < config.WorkerCount; i++ {
-		workerChs = append(workerChs, make(chan QueryParams))
-		go func(ch chan QueryParams) {
-			defer workerWg.Done()
-			for q := range ch {
-				now := time.Now()
-				err := runTestQuery(db, q)
-				elapsed := time.Since(now)
-				result <- QueryResult{
-					Host:     q.Host,
-					Duration: float64(elapsed.Milliseconds()),
-					Error:    err,
-				}
-			}
-		}(workerChs[i])
-	}
-	if workerChs == nil || len(workerChs) != config.WorkerCount {
-		errLogger.Fatalln("worker setup failure")
-	}
+	workerChs, result := startWorkers(db, config.WorkerCount)
+	errCh := make(chan error)
 
-	// close result channel after every worker finishes
 	go func() {
-		workerWg.Wait()
-		close(result)
+		for err := range errCh {
+			errLogger.Println(err)
+		}
 	}()
 
-	// listen to results and accumulate then print
-	var resWg sync.WaitGroup
-	resWg.Add(1)
-	parseFailure := 0
-	go func() {
-		var durations []float64
-		execCount := 0
-		sqlFailure := 0
+	statCh := make(chan Stats)
+	go collectResult(errCh, result, statCh)
 
-		min := math.Inf(1)
-		max := math.Inf(-1)
-		var sum float64 = 0
-		for r := range result {
-			if r.Error != nil {
-				errLogger.Printf("sql err: %v\n", r.Error)
-				sqlFailure += 1
-				continue
-			}
-
-			execCount += 1
-			durations = append(durations, r.Duration)
-			min = math.Min(min, r.Duration)
-			max = math.Max(max, r.Duration)
-			sum += r.Duration
-		}
-
-		mean := sum / float64(execCount)
-		totalCount := execCount + sqlFailure + parseFailure
-		sort.Float64s(durations)
-		infoLogger.Printf(
-			resultMsg,
-			totalCount,
-			execCount,
-			sqlFailure,
-			parseFailure,
-			sum,
-			min,
-			max,
-			mean,
-			percentile(durations, 50), // median
-			percentile(durations, 95),
-			percentile(durations, 99),
-		)
-		resWg.Done()
-	}()
-
-	// parse input rows and assign to workers
-	var reader io.Reader = os.Stdin
-	if config.File != "" {
-		f, err := os.Open(config.File)
-		if err != nil {
-			errLogger.Fatalln(err)
-		}
-		reader = f
-	}
-	csvReader := csv.NewReader(reader)
-	first, err := csvReader.Read()
-	if err != nil {
-		log.Fatal(err)
-	}
-	err = validateHeader(first)
+	parseFailure, err := processCsv(config.File, errCh, workerChs)
 	if err != nil {
 		errLogger.Fatalln(err)
-	}
-	lineNum := 2
-	hostWorkerMap := map[string]int{}
-	workerIndex := 0
-	for {
-		record, err := csvReader.Read()
-		if err == io.EOF {
-			break
-		}
-
-		if err != nil {
-			errLogger.Println(err)
-			parseFailure += 1
-			continue
-		}
-
-		query, err := parseLine(record)
-		if err != nil {
-			errLogger.Printf("record on line %d: %v\n", lineNum, err)
-			parseFailure += 1
-			continue
-		}
-
-		lineNum += 1
-
-		w, ok := hostWorkerMap[query.Host]
-		if !ok {
-			w = workerIndex
-			hostWorkerMap[query.Host] = w
-			workerIndex = (workerIndex + 1) % config.WorkerCount
-		}
-
-		ch := workerChs[w]
-		ch <- *query
 	}
 
 	for _, ch := range workerChs {
 		close(ch)
 	}
 
-	resWg.Wait()
+	stat := <-statCh
+
+	close(errCh)
+
+	printResult(parseFailure, stat)
 }
