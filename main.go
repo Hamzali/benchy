@@ -509,7 +509,7 @@ func formatResult(parseFailure int, stat Stats) string {
 
 func main() {
 	errLogger := log.New(os.Stderr, "", log.Lmsgprefix)
-	infoLogger := log.New(os.Stdin, "", log.Lmsgprefix)
+	infoLogger := log.New(os.Stdout, "", log.Lmsgprefix)
 
 	config, err := initConfig()
 	if err != nil {
