@@ -490,11 +490,10 @@ median:	%.2fms
 99th:	%.2fms
 `
 
-func printResult(parseFailure int, stat Stats) {
-	total := stat.ExecCount + stat.FailedCount + parseFailure
-	fmt.Printf(
+func formatResult(parseFailure int, stat Stats) string {
+	return fmt.Sprintf(
 		resultMsg,
-		total,
+		stat.ExecCount+stat.FailedCount+parseFailure,
 		stat.ExecCount,
 		stat.FailedCount,
 		parseFailure,
@@ -510,6 +509,7 @@ func printResult(parseFailure int, stat Stats) {
 
 func main() {
 	errLogger := log.New(os.Stderr, "", log.Lmsgprefix)
+	infoLogger := log.New(os.Stdin, "", log.Lmsgprefix)
 
 	config, err := initConfig()
 	if err != nil {
@@ -528,6 +528,8 @@ func main() {
 		errLogger.Fatalln(err)
 	}
 
+	infoLogger.Println("db connection opened...")
+
 	defer func() {
 		if err = db.Close(); err != nil {
 			errLogger.Println(err)
@@ -545,6 +547,8 @@ func main() {
 		}
 	}()
 
+	infoLogger.Println("workers started...")
+
 	statCh := make(chan Stats)
 	go collectResult(errCh, result, statCh)
 
@@ -561,5 +565,7 @@ func main() {
 
 	close(errCh)
 
-	printResult(parseFailure, stat)
+	resultStr := formatResult(parseFailure, stat)
+
+	infoLogger.Print(resultStr)
 }
