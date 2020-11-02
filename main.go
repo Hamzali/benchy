@@ -316,7 +316,7 @@ func parseCsv(reader io.Reader, cb func(err error, params *QueryParams)) error {
 		return err
 	}
 
-	lineNum := 0
+	lineNum := 1
 
 	for {
 		record, err := csvReader.Read()
