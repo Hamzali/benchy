@@ -216,7 +216,7 @@ type QueryResult struct {
 }
 
 // initialize workers and setup channels.
-func startWorkers(db *sql.DB, workerCount int) ([]chan QueryParams, chan QueryResult) {
+func startWorkers(workerCount int, work func(q QueryParams) error) ([]chan QueryParams, chan QueryResult) {
 	var workerChs []chan QueryParams
 
 	var workerWg sync.WaitGroup
@@ -232,7 +232,7 @@ func startWorkers(db *sql.DB, workerCount int) ([]chan QueryParams, chan QueryRe
 
 			for q := range ch {
 				now := time.Now()
-				err := runTestQuery(db, q)
+				err := work(q)
 				elapsed := time.Since(now)
 				result <- QueryResult{
 					Host:     q.Host,
@@ -534,7 +534,9 @@ func main() {
 		}
 	}()
 
-	workerChs, result := startWorkers(db, config.WorkerCount)
+	workerChs, result := startWorkers(config.WorkerCount, func(q QueryParams) error {
+		return runTestQuery(db, q)
+	})
 	errCh := make(chan error)
 
 	go func() {
