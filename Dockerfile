@@ -6,8 +6,8 @@ COPY ./go.mod  .
 COPY ./go.sum  .
 RUN go mod download
 
-COPY ./main.go .
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build
+COPY ./ .
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build cmd/benchy.go
 
 FROM scratch as final
 

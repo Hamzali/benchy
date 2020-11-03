@@ -16,8 +16,8 @@ requires a PostgreSQL instance to connect
  
 ## build and run
 golang:
-- `go install` then run `benchy`
-- `go build` then run `./benchy`
+- `go install cmd/benchy.go` then run `benchy`
+- `go build cmd/benchy.go` then run `./benchy`
  
 docker: 
 - build: `docker build -t benchy .`
