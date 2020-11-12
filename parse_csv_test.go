@@ -23,7 +23,7 @@ func TestReadCsv(t *testing.T) {
 	})
 
 	t.Run("should return file reader with valid file path", func(st *testing.T) {
-		reader, err := benchy.ReadCsv("./data/query_params.csv")
+		reader, err := benchy.ReadCsv("./test_data/query_params.csv")
 		if err != nil {
 			st.Fatal(err)
 		}
@@ -43,14 +43,14 @@ func TestReadCsv(t *testing.T) {
 	})
 }
 
-const testCsvContent = `hostname,start_time,end_time
+func TestParseCsv(t *testing.T) {
+	const testCsvContent = `hostname,start_time,end_time
 host_000008,2017-01-01 08:59:22,2017-01-01 09:59:22
 ,2017-01-01 08:59:22,2017-01-01 09:59:22
 host_000008,2017-01-01:22,2017-01-01 09:59:22
 host_000008,2017-01-01:22,2017-01-01 09:59:22,wrong_line
 host_000008,2017-01-01 08:59:22,2017-01-01 09:59`
 
-func TestParseCsv(t *testing.T) {
 	t.Run("should fail for invalid header", func(st *testing.T) {
 		r := strings.NewReader("invalid,header,value\nhost_000008,2017-01-01 08:59:22,2017-01-01 09:59:22")
 		err := benchy.ParseCsv(r, func(err error, host string, start, end time.Time) {})

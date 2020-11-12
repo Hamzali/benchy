@@ -1,6 +1,18 @@
-package main_test
+package main
 
-import "testing"
+import (
+	"os"
+	"testing"
+)
 
-func TestMain(m *testing.M) {
+func TestBenchy(t *testing.T) {
+	os.Args = []string{
+		"benchy",
+		"-config",
+		"../config.json",
+		"-file",
+		"../test_data/query_params.csv",
+	}
+
+	main()
 }
